@@ -1,5 +1,5 @@
 ---
-import { Database } from "bun:sqlite";
+import db, { cached } from "../db";
 import "../styles/global.css";
 
 interface Incident {
@@ -17,57 +17,43 @@ interface Incident {
 type Impact = "critical" | "major" | "minor" | "none";
 
 // –
-// Database
+// Fetch and store (cached 60s)
 // –
 
-const db = new Database("incidents.db");
+const toJSON = (r: Response) => r.json();
 
-db.run(`
-  CREATE TABLE IF NOT EXISTS incidents (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    status TEXT,
-    created_at TEXT,
-    updated_at TEXT,
-    resolved_at TEXT,
-    impact TEXT,
-    shortlink TEXT,
-    started_at TEXT
-  )
-`);
-
-// –
-// Fetch and store
-// –
-
-const [statusRes, unresolvedRes, response] = await Promise.all([
-  fetch('https://www.githubstatus.com/api/v2/status.json'),
-  fetch('https://www.githubstatus.com/api/v2/incidents/unresolved.json'),
-  fetch('https://www.githubstatus.com/api/v2/incidents.json'),
+const [status, unresolved, result] = await Promise.all([
+  cached<{ status: { description: string; indicator: string } }>(
+    'status', () => fetch('https://www.githubstatus.com/api/v2/status.json').then(toJSON)
+  ),
+  cached<{ incidents: (Incident & { incident_updates: { body: string }[] })[] }>(
+    'unresolved', () => fetch('https://www.githubstatus.com/api/v2/incidents/unresolved.json').then(toJSON)
+  ),
+  cached<{ incidents: Incident[] }>(
+    'incidents', () => fetch('https://www.githubstatus.com/api/v2/incidents.json').then(toJSON)
+  ),
 ]);
 
-const status: { status: { indicator: string; description: string } } = await statusRes.json();
-const unresolved: (Incident & { incident_updates: { body: string }[] })[] = (await unresolvedRes.json()).incidents;
-const result = await response.json();
+if (result) {
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO incidents 
+    (id, name, status, created_at, updated_at, resolved_at, impact, shortlink, started_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
 
-const insert = db.prepare(`
-  INSERT OR REPLACE INTO incidents 
-  (id, name, status, created_at, updated_at, resolved_at, impact, shortlink, started_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
-for (const incident of result.incidents) {
-  insert.run(
-    incident.id,
-    incident.name,
-    incident.status,
-    incident.created_at,
-    incident.updated_at,
-    incident.resolved_at,
-    incident.impact,
-    incident.shortlink,
-    incident.started_at
-  );
+  for (const incident of result.incidents) {
+    insert.run(
+      incident.id,
+      incident.name,
+      incident.status,
+      incident.created_at,
+      incident.updated_at,
+      incident.resolved_at,
+      incident.impact,
+      incident.shortlink,
+      incident.started_at
+    );
+  }
 }
 
 // –
@@ -227,51 +213,53 @@ const peakMonth = months.reduce((best, m) => m.count > best.count ? m : best, mo
 		</header>
 
 		{/* Current status */}
-		<div class:list={[
-			"max-w-7xl mx-auto rounded-xl border p-4 sm:p-5 mb-6",
-			status.status.indicator === "none"     && "border-green-800/60 bg-green-950/30",
-			status.status.indicator === "minor"    && "border-amber-800/60 bg-amber-950/30",
-			status.status.indicator === "major"    && "border-red-800/60 bg-red-950/30",
-			status.status.indicator === "critical" && "border-red-600/60 bg-red-950/50",
-		]}>
-			<div class="flex items-center gap-3 mb-1">
-				<span class:list={[
-					"inline-block size-3 rounded-full",
-					status.status.indicator === "none"     && "bg-green-500",
-					status.status.indicator === "minor"    && "bg-amber-500",
-					status.status.indicator === "major"    && "bg-red-500",
-					status.status.indicator === "critical" && "bg-red-400 animate-pulse",
-				]}></span>
-				<span class="text-lg font-semibold text-white">{status.status.description}</span>
-			</div>
-
-			{unresolved.length > 0 && (
-				<div class="mt-3 flex flex-col gap-2">
-					{unresolved.map((incident) => (
-					<div class="rounded-lg bg-gray-950/60 border border-gray-800 px-4 py-3">
-							<div class="flex items-baseline justify-between gap-3">
-								<a href={incident.shortlink} target="_blank" rel="noopener"
-									class="font-medium text-blue-400 hover:underline min-w-0">
-									{incident.name}
-								</a>
-								<span class:list={[
-									"shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold uppercase",
-									incident.impact === "critical" && "bg-red-500/20 text-red-400",
-									incident.impact === "major"    && "bg-red-500/15 text-red-400",
-									incident.impact === "minor"    && "bg-amber-500/15 text-amber-400",
-									incident.impact === "none"     && "bg-blue-500/15 text-blue-400",
-								]}>
-									{incident.impact}
-								</span>
-							</div>
-							<p class="mt-1 text-xs text-gray-400 line-clamp-2">
-								{incident.incident_updates[0]?.body.replace(/<[^>]*>/g, '')}
-							</p>
-						</div>
-					))}
+		{status && (
+			<div class:list={[
+				"max-w-7xl mx-auto rounded-xl border p-4 sm:p-5 mb-6",
+				status.status.indicator === "none"     && "border-green-800/60 bg-green-950/30",
+				status.status.indicator === "minor"    && "border-amber-800/60 bg-amber-950/30",
+				status.status.indicator === "major"    && "border-red-800/60 bg-red-950/30",
+				status.status.indicator === "critical" && "border-red-600/60 bg-red-950/50",
+			]}>
+				<div class="flex items-center gap-3 mb-1">
+					<span class:list={[
+						"inline-block size-3 rounded-full",
+						status.status.indicator === "none"     && "bg-green-500",
+						status.status.indicator === "minor"    && "bg-amber-500",
+						status.status.indicator === "major"    && "bg-red-500",
+						status.status.indicator === "critical" && "bg-red-400 animate-pulse",
+					]}></span>
+					<span class="text-lg font-semibold text-white">{status.status.description}</span>
 				</div>
-			)}
-		</div>
+
+				{unresolved && unresolved.incidents.length > 0 && (
+					<div class="mt-3 flex flex-col gap-2">
+						{unresolved.incidents.map((incident) => (
+							<div class="rounded-lg bg-gray-950/60 border border-gray-800 px-4 py-3">
+								<div class="flex items-baseline justify-between gap-3">
+									<a href={incident.shortlink} target="_blank" rel="noopener"
+										class="font-medium text-blue-400 hover:underline min-w-0">
+										{incident.name}
+									</a>
+									<span class:list={[
+										"shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold uppercase",
+										incident.impact === "critical" && "bg-red-500/20 text-red-400",
+										incident.impact === "major"    && "bg-red-500/15 text-red-400",
+										incident.impact === "minor"    && "bg-amber-500/15 text-amber-400",
+										incident.impact === "none"     && "bg-blue-500/15 text-blue-400",
+									]}>
+										{incident.impact}
+									</span>
+								</div>
+								<p class="mt-1 text-xs text-gray-400 line-clamp-2">
+									{incident.incident_updates[0]?.body.replace(/<[^>]*>/g, '')}
+								</p>
+							</div>
+						))}
+					</div>
+				)}
+			</div>
+		)}
 
 		<div class="scroll-right max-w-7xl mx-auto overflow-x-auto rounded-xl bg-gray-900/60 border border-gray-800 py-4 pl-4 sm:py-6 sm:pl-6 mb-3">
 			<div class="inline-flex gap-[3px] sm:gap-[5px]">

@@ -1,0 +1,147 @@
+---
+import db from "../db";
+import "../styles/global.css";
+
+interface Row {
+  count: number;
+  key: string;
+}
+
+// –
+// Queries
+// –
+
+const total = (db.prepare("SELECT COUNT(*) as count FROM visits").get() as { count: number }).count;
+
+const byDay = db.prepare(`
+  SELECT date(visited_at) as key, COUNT(*) as count
+  FROM visits GROUP BY key ORDER BY key DESC LIMIT 30
+`).all() as Row[];
+
+const byRegion = db.prepare(`
+  SELECT region as key, COUNT(*) as count
+  FROM visits GROUP BY key ORDER BY count DESC
+`).all() as Row[];
+
+const byReferrer = db.prepare(`
+  SELECT CASE WHEN referrer = '' THEN '(direct)' ELSE referrer END as key, COUNT(*) as count
+  FROM visits GROUP BY key ORDER BY count DESC LIMIT 20
+`).all() as Row[];
+
+const byPath = db.prepare(`
+  SELECT path as key, COUNT(*) as count
+  FROM visits GROUP BY key ORDER BY count DESC
+`).all() as Row[];
+---
+
+<html lang="en" class="dark">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width" />
+		<title>Stats — Github Downfall</title>
+	</head>
+	<body class="min-h-screen bg-gray-950 text-gray-200 px-4 py-6 md:p-12 font-sans">
+		<header class="max-w-4xl mx-auto mb-8">
+			<div class="flex items-center gap-3">
+				<a href="/" class="text-gray-500 hover:text-white transition-colors">
+					<svg xmlns="http://www.w3.org/2000/svg" class="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+					</svg>
+				</a>
+				<h1 class="text-2xl font-bold tracking-tight text-white">Visitor Stats</h1>
+			</div>
+			<p class="mt-2 text-4xl font-bold text-white tabular-nums">{total.toLocaleString()}</p>
+			<p class="text-sm text-gray-500">total visits</p>
+		</header>
+
+		<div class="max-w-4xl mx-auto space-y-6">
+
+			{/* Visits by day */}
+			<section class="rounded-xl bg-gray-900/60 border border-gray-800 p-5">
+				<h2 class="text-sm font-semibold text-white mb-4">Visits per day</h2>
+				{byDay.length === 0 ? (
+					<p class="text-sm text-gray-500">No data yet.</p>
+				) : (
+				<div class="flex items-end gap-1.5" style={`min-width: ${byDay.length * 2}rem;`}>
+					{[...byDay].reverse().map((d) => {
+						const max = Math.max(...byDay.map(r => r.count), 1);
+						const pct = d.count / max;
+						return (
+							<div class="flex-1 flex flex-col items-center group">
+								<div class="w-full flex flex-col items-center justify-end h-24">
+									<span class="text-[10px] text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity mb-1">
+										{d.count}
+									</span>
+									<div
+										class="w-full rounded-t bg-blue-600/80 group-hover:bg-blue-500 transition-colors"
+										style={`height: ${Math.max(pct * 100, 3)}%`}
+										title={`${d.key}: ${d.count} visits`}
+									></div>
+								</div>
+								<span class="text-[10px] text-gray-600 w-full text-center mt-1.5">
+									{d.key.slice(5)}
+								</span>
+							</div>
+						);
+					})}
+				</div>
+				)}
+			</section>
+
+			<div class="grid md:grid-cols-3 gap-4">
+
+				{/* By region */}
+				<section class="rounded-xl bg-gray-900/60 border border-gray-800 p-5">
+					<h2 class="text-sm font-semibold text-white mb-3">By region</h2>
+					{byRegion.length === 0 ? (
+						<p class="text-sm text-gray-500">No data yet.</p>
+					) : (
+						<div class="space-y-1.5">
+							{byRegion.map((r) => (
+								<div class="flex items-baseline justify-between text-sm">
+									<span class="text-gray-300 uppercase text-xs font-mono">{r.key}</span>
+									<span class="text-xs text-gray-500 tabular-nums">{r.count}</span>
+								</div>
+							))}
+						</div>
+					)}
+				</section>
+
+				{/* By path */}
+				<section class="rounded-xl bg-gray-900/60 border border-gray-800 p-5">
+					<h2 class="text-sm font-semibold text-white mb-3">By page</h2>
+					{byPath.length === 0 ? (
+						<p class="text-sm text-gray-500">No data yet.</p>
+					) : (
+						<div class="space-y-1.5">
+							{byPath.map((r) => (
+								<div class="flex items-baseline justify-between text-sm gap-2">
+									<span class="text-gray-300 font-mono text-xs truncate">{r.key}</span>
+									<span class="text-xs text-gray-500 tabular-nums shrink-0">{r.count}</span>
+								</div>
+							))}
+						</div>
+					)}
+				</section>
+
+				{/* By referrer */}
+				<section class="rounded-xl bg-gray-900/60 border border-gray-800 p-5">
+					<h2 class="text-sm font-semibold text-white mb-3">By referrer</h2>
+					{byReferrer.length === 0 ? (
+						<p class="text-sm text-gray-500">No data yet.</p>
+					) : (
+						<div class="space-y-1.5">
+							{byReferrer.map((r) => (
+								<div class="flex items-baseline justify-between text-sm gap-2">
+									<span class="text-gray-300 text-xs truncate">{r.key}</span>
+									<span class="text-xs text-gray-500 tabular-nums shrink-0">{r.count}</span>
+								</div>
+							))}
+						</div>
+					)}
+				</section>
+			</div>
+		</div>
+	</body>
+</html>
