@@ -1,0 +1,6 @@
+node_modules
+dist
+.sprite
+incidents.db
+*.db-journal
+*.db-wal

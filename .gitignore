@@ -1,3 +1,5 @@
+incidents.db
+
 # build output
 dist/
 # generated types
