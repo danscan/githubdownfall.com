@@ -1,43 +1,19 @@
-# Astro Starter Kit: Minimal
+# Github Downfall
+
+Track Github's historical incidents and downtime. A contribution graph-style heatmap of every Github incident since January 2025, with trend analysis and live status.
+
+Built with Astro, Tailwind, and Bun SQLite.
+
+## Setup
 
 ```sh
-bun create astro@latest -- --template minimal
+bun install
+bun run scrape.ts  # backfill incidents from 2025 onward
+bun --bun dev      # start dev server at localhost:4321
 ```
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## How it works
 
-## 🚀 Project Structure
+On each page load, the latest 50 incidents are fetched from the [Github Status API](https://www.githubstatus.com/api) and upserted into a local SQLite database. The `scrape.ts` script backfills historical incidents by parsing the embedded data from `githubstatus.com/history` pages and fetching full details via the individual incident API.
 
-Inside of your Astro project, you'll see the following folders and files:
-
-```text
-/
-├── public/
-├── src/
-│   └── pages/
-│       └── index.astro
-└── package.json
-```
-
-Astro looks for `.astro` or `.md` files in the `src/pages/` directory. Each page is exposed as a route based on its file name.
-
-There's nothing special about `src/components/`, but that's where we like to put any Astro/React/Vue/Svelte/Preact components.
-
-Any static assets, like images, can be placed in the `public/` directory.
-
-## 🧞 Commands
-
-All commands are run from the root of the project, from a terminal:
-
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `bun install`             | Installs dependencies                            |
-| `bun dev`             | Starts local dev server at `localhost:4321`      |
-| `bun build`           | Build your production site to `./dist/`          |
-| `bun preview`         | Preview your build locally, before deploying     |
-| `bun astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `bun astro -- --help` | Get help using the Astro CLI                     |
-
-## 👀 Want to learn more?
-
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
+The frontend renders a year-long heatmap where redder days indicate higher cumulative incident severity. Clicking a day shows its incidents. A trends section shows frequency/severity changes, impact breakdown, worst days, and a monthly bar chart.

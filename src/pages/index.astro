@@ -1,17 +1,534 @@
 ---
+import { Database } from "bun:sqlite";
+import "../styles/global.css";
 
+interface Incident {
+  created_at: string;
+  id: string;
+  impact: string;
+  name: string;
+  resolved_at: string | null;
+  shortlink: string;
+  started_at: string;
+  status: string;
+  updated_at: string;
+}
+
+type Impact = "critical" | "major" | "minor" | "none";
+
+// –
+// Database
+// –
+
+const db = new Database("incidents.db");
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS incidents (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    status TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    resolved_at TEXT,
+    impact TEXT,
+    shortlink TEXT,
+    started_at TEXT
+  )
+`);
+
+// –
+// Fetch and store
+// –
+
+const [statusRes, unresolvedRes, response] = await Promise.all([
+  fetch('https://www.githubstatus.com/api/v2/status.json'),
+  fetch('https://www.githubstatus.com/api/v2/incidents/unresolved.json'),
+  fetch('https://www.githubstatus.com/api/v2/incidents.json'),
+]);
+
+const status: { status: { indicator: string; description: string } } = await statusRes.json();
+const unresolved: (Incident & { incident_updates: { body: string }[] })[] = (await unresolvedRes.json()).incidents;
+const result = await response.json();
+
+const insert = db.prepare(`
+  INSERT OR REPLACE INTO incidents 
+  (id, name, status, created_at, updated_at, resolved_at, impact, shortlink, started_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+for (const incident of result.incidents) {
+  insert.run(
+    incident.id,
+    incident.name,
+    incident.status,
+    incident.created_at,
+    incident.updated_at,
+    incident.resolved_at,
+    incident.impact,
+    incident.shortlink,
+    incident.started_at
+  );
+}
+
+// –
+// Data aggregation
+// –
+
+const impactWeights = {
+  critical: 4,
+  major: 3,
+  minor: 2,
+  none: 1
+};
+
+const incidents = db.prepare(`
+  SELECT * FROM incidents ORDER BY started_at DESC
+`).all() as Incident[];
+
+// Group by day and calculate severity
+const dayMap = new Map<string, { severity: number; incidents: Incident[] }>();
+
+for (const incident of incidents) {
+  const date = new Date(incident.started_at);
+  const dayKey = date.toISOString().split('T')[0];
+  
+  if (!dayMap.has(dayKey)) {
+    dayMap.set(dayKey, { severity: 0, incidents: [] });
+  }
+  
+  const day = dayMap.get(dayKey)!;
+  day.severity += impactWeights[incident.impact as Impact] || 1;
+  day.incidents.push(incident);
+}
+
+// Generate last year of days
+const today = new Date();
+const oneYearAgo = new Date(today);
+oneYearAgo.setFullYear(today.getFullYear() - 1);
+
+const weeks = [];
+let currentWeek = [];
+let currentDate = new Date(oneYearAgo);
+
+// Start on Sunday
+currentDate.setDate(currentDate.getDate() - currentDate.getDay());
+
+while (currentDate <= today) {
+  const dayKey = currentDate.toISOString().split('T')[0];
+  const dayData = dayMap.get(dayKey);
+  
+  currentWeek.push({
+    date: dayKey,
+    severity: dayData?.severity || 0,
+    count: dayData?.incidents.length || 0,
+    incidents: dayData?.incidents || []
+  });
+  
+  if (currentWeek.length === 7) {
+    weeks.push(currentWeek);
+    currentWeek = [];
+  }
+  
+  currentDate.setDate(currentDate.getDate() + 1);
+}
+
+if (currentWeek.length > 0) {
+  weeks.push(currentWeek);
+}
+
+const maxSeverity = Math.max(...Array.from(dayMap.values()).map(d => d.severity), 1);
+
+// –
+// Trends
+// –
+
+// Monthly breakdown
+const monthMap = new Map<string, { count: number; severity: number; major: number }>();
+for (const incident of incidents) {
+  const key = incident.started_at.slice(0, 7); // YYYY-MM
+  if (!monthMap.has(key)) monthMap.set(key, { count: 0, severity: 0, major: 0 });
+  const m = monthMap.get(key)!;
+  m.count++;
+  m.severity += impactWeights[incident.impact as Impact] || 1;
+  if (incident.impact === "major" || incident.impact === "critical") m.major++;
+}
+
+const months = [...monthMap.entries()]
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([key, data]) => ({ key, label: new Date(key + '-01').toLocaleDateString('en-US', { month: 'short', year: 'numeric' }), ...data }));
+
+// Recent vs prior half comparison
+const half = Math.floor(months.length / 2);
+const recentMonths = months.slice(half);
+const priorMonths = months.slice(0, half);
+const recentAvg = recentMonths.length ? recentMonths.reduce((s, m) => s + m.count, 0) / recentMonths.length : 0;
+const priorAvg = priorMonths.length ? priorMonths.reduce((s, m) => s + m.count, 0) / priorMonths.length : 0;
+const freqChange = priorAvg > 0 ? ((recentAvg - priorAvg) / priorAvg * 100) : 0;
+
+// Severity trend
+const recentSevAvg = recentMonths.length ? recentMonths.reduce((s, m) => s + m.severity, 0) / recentMonths.length : 0;
+const priorSevAvg = priorMonths.length ? priorMonths.reduce((s, m) => s + m.severity, 0) / priorMonths.length : 0;
+const sevChange = priorSevAvg > 0 ? ((recentSevAvg - priorSevAvg) / priorSevAvg * 100) : 0;
+
+// Impact breakdown
+const impactCounts = { critical: 0, major: 0, minor: 0, none: 0 };
+for (const i of incidents) impactCounts[i.impact as Impact] = (impactCounts[i.impact as Impact] || 0) + 1;
+
+// Worst days by severity
+const worstDays = [...dayMap.entries()]
+  .sort(([, a], [, b]) => b.severity - a.severity)
+  .slice(0, 5)
+  .map(([date, data]) => ({
+    date,
+    label: new Date(date + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    ...data,
+  }));
+
+// Longest calm streak
+let longestStreak = 0;
+let currentStreak = 0;
+let streakEnd = '';
+let bestStreakEnd = '';
+const sortedDays = [...dayMap.keys()].sort();
+const firstDay = incidents.length ? incidents.at(-1)!.started_at.split('T')[0] : today.toISOString().split('T')[0];
+const iterDate = new Date(firstDay);
+while (iterDate <= today) {
+  const key = iterDate.toISOString().split('T')[0];
+  if (!dayMap.has(key)) {
+    currentStreak++;
+    streakEnd = key;
+    if (currentStreak > longestStreak) {
+      longestStreak = currentStreak;
+      bestStreakEnd = streakEnd;
+    }
+  } else {
+    currentStreak = 0;
+  }
+  iterDate.setDate(iterDate.getDate() + 1);
+}
+
+// Peak month
+const peakMonth = months.reduce((best, m) => m.count > best.count ? m : best, months[0]);
 ---
 
-<html lang="en">
+<html lang="en" class="dark">
 	<head>
 		<meta charset="utf-8" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
+		<title>Github Downfall</title>
 	</head>
-	<body>
-		<h1>Astro</h1>
+	<body class="min-h-screen bg-gray-950 text-gray-200 px-4 py-6 md:p-12 font-sans">
+		<header class="max-w-7xl mx-auto mb-8">
+			<h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-white">Github Downfall</h1>
+			<p class="mt-1 text-sm text-gray-400">Track Github's historical incidents and downtime</p>
+			<p class="mt-1 text-xs text-gray-500">{incidents.length} incidents recorded since Jan 2025</p>
+		</header>
+
+		{/* Current status */}
+		<div class:list={[
+			"max-w-7xl mx-auto rounded-xl border p-4 sm:p-5 mb-6",
+			status.status.indicator === "none"     && "border-green-800/60 bg-green-950/30",
+			status.status.indicator === "minor"    && "border-amber-800/60 bg-amber-950/30",
+			status.status.indicator === "major"    && "border-red-800/60 bg-red-950/30",
+			status.status.indicator === "critical" && "border-red-600/60 bg-red-950/50",
+		]}>
+			<div class="flex items-center gap-3 mb-1">
+				<span class:list={[
+					"inline-block size-3 rounded-full",
+					status.status.indicator === "none"     && "bg-green-500",
+					status.status.indicator === "minor"    && "bg-amber-500",
+					status.status.indicator === "major"    && "bg-red-500",
+					status.status.indicator === "critical" && "bg-red-400 animate-pulse",
+				]}></span>
+				<span class="text-lg font-semibold text-white">{status.status.description}</span>
+			</div>
+
+			{unresolved.length > 0 && (
+				<div class="mt-3 flex flex-col gap-2">
+					{unresolved.map((incident) => (
+					<div class="rounded-lg bg-gray-950/60 border border-gray-800 px-4 py-3">
+							<div class="flex items-baseline justify-between gap-3">
+								<a href={incident.shortlink} target="_blank" rel="noopener"
+									class="font-medium text-blue-400 hover:underline min-w-0">
+									{incident.name}
+								</a>
+								<span class:list={[
+									"shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold uppercase",
+									incident.impact === "critical" && "bg-red-500/20 text-red-400",
+									incident.impact === "major"    && "bg-red-500/15 text-red-400",
+									incident.impact === "minor"    && "bg-amber-500/15 text-amber-400",
+									incident.impact === "none"     && "bg-blue-500/15 text-blue-400",
+								]}>
+									{incident.impact}
+								</span>
+							</div>
+							<p class="mt-1 text-xs text-gray-400 line-clamp-2">
+								{incident.incident_updates[0]?.body.replace(/<[^>]*>/g, '')}
+							</p>
+						</div>
+					))}
+				</div>
+			)}
+		</div>
+
+		<div class="scroll-right max-w-7xl mx-auto overflow-x-auto rounded-xl bg-gray-900/60 border border-gray-800 py-4 pl-4 sm:py-6 sm:pl-6 mb-3">
+			<div class="inline-flex gap-[3px] sm:gap-[5px]">
+				{weeks.map((week) => (
+					<div class="flex flex-col gap-[3px] sm:gap-[5px]">
+						{week.map((day) => (
+							<div 
+								class:list={[
+									"day size-[14px] sm:size-[18px] rounded-sm cursor-pointer transition-all border border-gray-700/60",
+									"hover:outline-2 hover:outline-gray-400 hover:outline-offset-1",
+									day.severity === 0 && "bg-gray-900"
+								]}
+								data-date={day.date}
+								data-severity={day.severity}
+								data-count={day.count}
+								title={`${day.date}: ${day.count} incident${day.count !== 1 ? 's' : ''}`}
+								style={day.severity > 0
+									? `background: rgb(${Math.min(255, 100 + (day.severity / maxSeverity) * 155)}, ${Math.max(0, 50 - (day.severity / maxSeverity) * 50)}, ${Math.max(0, 50 - (day.severity / maxSeverity) * 50)}); border-color: transparent;`
+									: undefined}
+							></div>
+						))}
+					</div>
+				))}
+				<div class="shrink-0 w-4 sm:w-6"></div>
+			</div>
+		</div>
+		<div class="max-w-7xl mx-auto flex justify-end items-center gap-1.5 text-xs text-gray-500 mb-6">
+			<span>Less</span>
+			<span class="inline-block size-3 rounded-sm border border-gray-700 bg-gray-900"></span>
+			<span class="inline-block size-3 rounded-sm bg-red-950"></span>
+			<span class="inline-block size-3 rounded-sm bg-red-700"></span>
+			<span class="inline-block size-3 rounded-sm bg-red-500"></span>
+			<span>More</span>
+		</div>
+
+		{/* Trends (visible when no day selected) */}
+		<div id="trends" class="max-w-7xl mx-auto mb-6 space-y-6">
+
+			{/* Stat cards */}
+			<div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+				<div class="rounded-xl bg-gray-900/60 border border-gray-800 p-4">
+					<p class="text-xs text-gray-500 uppercase tracking-wide">Frequency trend</p>
+					<p class="mt-1 text-2xl font-bold text-white">
+						{freqChange > 0 ? '+' : ''}{freqChange.toFixed(0)}%
+					</p>
+					<p class="mt-0.5 text-xs text-gray-500">
+						{recentAvg.toFixed(1)}/mo vs {priorAvg.toFixed(1)}/mo prior
+					</p>
+				</div>
+				<div class="rounded-xl bg-gray-900/60 border border-gray-800 p-4">
+					<p class="text-xs text-gray-500 uppercase tracking-wide">Severity trend</p>
+					<p class="mt-1 text-2xl font-bold text-white">
+						{sevChange > 0 ? '+' : ''}{sevChange.toFixed(0)}%
+					</p>
+					<p class="mt-0.5 text-xs text-gray-500">
+						avg weighted severity/mo
+					</p>
+				</div>
+				<div class="rounded-xl bg-gray-900/60 border border-gray-800 p-4">
+					<p class="text-xs text-gray-500 uppercase tracking-wide">Longest calm streak</p>
+					<p class="mt-1 text-2xl font-bold text-white">{longestStreak} days</p>
+					<p class="mt-0.5 text-xs text-gray-500">
+						ending {new Date(bestStreakEnd + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+					</p>
+				</div>
+				<div class="rounded-xl bg-gray-900/60 border border-gray-800 p-4">
+					<p class="text-xs text-gray-500 uppercase tracking-wide">Busiest month</p>
+					<p class="mt-1 text-2xl font-bold text-white">{peakMonth.count} incidents</p>
+					<p class="mt-0.5 text-xs text-gray-500">{peakMonth.label}</p>
+				</div>
+			</div>
+
+			<div class="grid md:grid-cols-2 gap-4">
+				{/* Impact breakdown */}
+				<div class="rounded-xl bg-gray-900/60 border border-gray-800 p-5">
+					<h3 class="text-sm font-semibold text-white mb-3">Impact breakdown</h3>
+					<div class="space-y-2">
+						{(["critical", "major", "minor", "none"] as const).map((level) => {
+							const count = impactCounts[level];
+							const pct = incidents.length ? (count / incidents.length * 100) : 0;
+							const colors = {
+								critical: "bg-red-500",
+								major: "bg-red-700",
+								minor: "bg-amber-600",
+								none: "bg-blue-600",
+							};
+							return (
+								<div>
+									<div class="flex justify-between text-xs mb-1">
+										<span class="uppercase text-gray-400">{level}</span>
+										<span class="text-gray-500">{count} ({pct.toFixed(0)}%)</span>
+									</div>
+									<div class="h-1.5 rounded-full bg-gray-800">
+										<div class={`h-full rounded-full ${colors[level]}`} style={`width: ${pct}%`}></div>
+									</div>
+								</div>
+							);
+						})}
+					</div>
+				</div>
+
+				{/* Worst days */}
+				<div class="rounded-xl bg-gray-900/60 border border-gray-800 p-5">
+					<h3 class="text-sm font-semibold text-white mb-3">Worst days</h3>
+					<div class="space-y-2">
+						{worstDays.map((day, rank) => {
+							const majors = day.incidents.filter((i: Incident) => i.impact === "major" || i.impact === "critical").length;
+							return (
+								<div class="flex items-baseline justify-between gap-2 text-sm">
+									<div class="flex items-baseline gap-2 min-w-0">
+										<span class="text-gray-600 text-xs shrink-0">{rank + 1}.</span>
+										<span class="text-gray-300 truncate">{day.label}</span>
+									</div>
+									<span class="text-xs text-gray-500 shrink-0">
+										{day.incidents.length} incident{day.incidents.length !== 1 ? 's' : ''}{majors > 0 && `, ${majors} major`}
+									</span>
+								</div>
+							);
+						})}
+					</div>
+				</div>
+			</div>
+
+			{/* Monthly chart */}
+			<div class="scroll-right rounded-xl bg-gray-900/60 border border-gray-800 p-5 overflow-x-auto">
+				<h3 class="text-sm font-semibold text-white mb-4">Incidents per month</h3>
+				<div class="flex items-end gap-2 sm:gap-3" style={`height: 8rem; min-width: ${months.length * 2.5}rem;`}>
+					{months.map((m) => {
+						const maxCount = Math.max(...months.map(x => x.count), 1);
+						const pct = m.count / maxCount;
+						return (
+							<div class="flex-1 flex flex-col items-center justify-end h-full group">
+								<span class="text-[10px] text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity mb-1">
+									{m.count}
+								</span>
+								<div
+									class="w-full rounded-t bg-red-700/80 group-hover:bg-red-600 transition-colors"
+									style={`height: ${Math.max(pct * 100, 3)}%`}
+									title={`${m.label}: ${m.count} incidents (${m.major} major+)`}
+								></div>
+								<span class="text-[10px] text-gray-600 truncate w-full text-center mt-1.5">
+									{m.label.split(' ')[0]}
+								</span>
+							</div>
+						);
+					})}
+				</div>
+			</div>
+		</div>
+
+		<div id="incidents" class="hidden max-w-7xl mx-auto rounded-xl bg-gray-900/60 border border-gray-800 p-4 sm:p-6">
+			<div class="flex items-center justify-between mb-4">
+				<h2 id="incidents-header" class="text-lg font-semibold text-white"></h2>
+				<button id="close-incidents" class="text-gray-500 hover:text-white transition-colors p-1 -mr-1" aria-label="Close">
+					<svg xmlns="http://www.w3.org/2000/svg" class="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+			<div id="incident-list" class="flex flex-col gap-3"></div>
+		</div>
+
+		<script define:vars={{ dayMap: Object.fromEntries(dayMap) }}>
+			const days = document.querySelectorAll('.day');
+			const container = document.getElementById('incidents');
+			const trends = document.getElementById('trends');
+			const header = document.getElementById('incidents-header');
+			const list = document.getElementById('incident-list');
+			const closeBtn = document.getElementById('close-incidents');
+			let selectedDay = null;
+
+			const impactClasses = {
+				critical: 'bg-red-500/20 text-red-400',
+				major:    'bg-red-500/15 text-red-400',
+				minor:    'bg-amber-500/15 text-amber-400',
+				none:     'bg-blue-500/15 text-blue-400'
+			};
+
+			function deselect() {
+				if (selectedDay) {
+					selectedDay.classList.remove('outline-2', 'outline-blue-400', 'outline-offset-1');
+					selectedDay = null;
+				}
+				container.classList.add('hidden');
+				trends.classList.remove('hidden');
+			}
+
+			closeBtn.addEventListener('click', deselect);
+
+			days.forEach(day => {
+				day.addEventListener('click', () => {
+					const date = day.dataset.date;
+					const count = parseInt(day.dataset.count);
+
+					// Update selection
+					if (selectedDay) {
+						selectedDay.classList.remove('outline-2', 'outline-blue-400', 'outline-offset-1');
+					}
+					day.classList.add('outline-2', 'outline-blue-400', 'outline-offset-1');
+					selectedDay = day;
+
+					// Format header
+					const formatted = new Date(date + 'T00:00:00').toLocaleDateString('en-US', {
+						weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+					});
+					header.textContent = `${formatted} — ${count} incident${count !== 1 ? 's' : ''}`;
+
+					// Render incidents or empty state
+					const data = dayMap[date];
+					if (!data || count === 0) {
+						list.innerHTML = '<p class="text-sm text-gray-500">No incidents on this day.</p>';
+					} else {
+						list.innerHTML = data.incidents.map(incident => {
+							const badge = impactClasses[incident.impact] || impactClasses.none;
+							const time = new Date(incident.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+							return `
+								<div class="p-4 rounded-lg bg-gray-950 border border-gray-800 flex items-start justify-between gap-4">
+									<div class="min-w-0">
+										<a href="${incident.shortlink}" target="_blank" rel="noopener"
+											class="font-medium text-blue-400 hover:underline">
+											${incident.name}
+										</a>
+										<div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+											<span class="inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase ${badge}">
+												${incident.impact}
+											</span>
+											<span>${incident.status}</span>
+											<span class="text-gray-600">·</span>
+											<span>${time}</span>
+										</div>
+									</div>
+									<svg xmlns="http://www.w3.org/2000/svg" class="size-4 shrink-0 mt-1 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+										<path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4M14 4h6m0 0v6m0-6L10 14" />
+									</svg>
+								</div>`;
+						}).join('');
+					}
+
+					trends.classList.add('hidden');
+					container.classList.remove('hidden');
+					container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+				});
+			});
+		</script>
+
+		<script is:inline>
+			// Scroll overflow containers to the right (most recent data)
+			requestAnimationFrame(() => {
+				document.querySelectorAll('.scroll-right').forEach(el => {
+					el.scrollLeft = el.scrollWidth;
+				});
+			});
+		</script>
+
+		<footer class="max-w-7xl mx-auto mt-12 py-6 border-t border-gray-800 text-center text-sm text-gray-500">
+			Created and deployed by Dan Scanlon in 78 minutes. Want to <a href="https://ronindevs.com" target="_blank" rel="noopener" class="text-blue-400 hover:underline">work with me?</a>
+		</footer>
 	</body>
 </html>
