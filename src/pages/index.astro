@@ -1,128 +1,9 @@
 ---
-import db, { cached } from "../db";
+import { sync, heatmap, impactWeights, type Impact, type Incident } from "../data";
 import "../styles/global.css";
 
-interface Incident {
-  created_at: string;
-  id: string;
-  impact: string;
-  name: string;
-  resolved_at: string | null;
-  shortlink: string;
-  started_at: string;
-  status: string;
-  updated_at: string;
-}
-
-type Impact = "critical" | "major" | "minor" | "none";
-
-// –
-// Fetch and store (cached 60s)
-// –
-
-const toJSON = (r: Response) => r.json();
-
-const [status, unresolved, result] = await Promise.all([
-  cached<{ status: { description: string; indicator: string } }>(
-    'status', () => fetch('https://www.githubstatus.com/api/v2/status.json').then(toJSON)
-  ),
-  cached<{ incidents: (Incident & { incident_updates: { body: string }[] })[] }>(
-    'unresolved', () => fetch('https://www.githubstatus.com/api/v2/incidents/unresolved.json').then(toJSON)
-  ),
-  cached<{ incidents: Incident[] }>(
-    'incidents', () => fetch('https://www.githubstatus.com/api/v2/incidents.json').then(toJSON)
-  ),
-]);
-
-if (result) {
-  const insert = db.prepare(`
-    INSERT OR REPLACE INTO incidents 
-    (id, name, status, created_at, updated_at, resolved_at, impact, shortlink, started_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  for (const incident of result.incidents) {
-    insert.run(
-      incident.id,
-      incident.name,
-      incident.status,
-      incident.created_at,
-      incident.updated_at,
-      incident.resolved_at,
-      incident.impact,
-      incident.shortlink,
-      incident.started_at
-    );
-  }
-}
-
-// –
-// Data aggregation
-// –
-
-const impactWeights = {
-  critical: 4,
-  major: 3,
-  minor: 2,
-  none: 1
-};
-
-const incidents = db.prepare(`
-  SELECT * FROM incidents ORDER BY started_at DESC
-`).all() as Incident[];
-
-// Group by day and calculate severity
-const dayMap = new Map<string, { severity: number; incidents: Incident[] }>();
-
-for (const incident of incidents) {
-  const date = new Date(incident.started_at);
-  const dayKey = date.toISOString().split('T')[0];
-  
-  if (!dayMap.has(dayKey)) {
-    dayMap.set(dayKey, { severity: 0, incidents: [] });
-  }
-  
-  const day = dayMap.get(dayKey)!;
-  day.severity += impactWeights[incident.impact as Impact] || 1;
-  day.incidents.push(incident);
-}
-
-// Generate last year of days
-const today = new Date();
-const oneYearAgo = new Date(today);
-oneYearAgo.setFullYear(today.getFullYear() - 1);
-
-const weeks = [];
-let currentWeek = [];
-let currentDate = new Date(oneYearAgo);
-
-// Start on Sunday
-currentDate.setDate(currentDate.getDate() - currentDate.getDay());
-
-while (currentDate <= today) {
-  const dayKey = currentDate.toISOString().split('T')[0];
-  const dayData = dayMap.get(dayKey);
-  
-  currentWeek.push({
-    date: dayKey,
-    severity: dayData?.severity || 0,
-    count: dayData?.incidents.length || 0,
-    incidents: dayData?.incidents || []
-  });
-  
-  if (currentWeek.length === 7) {
-    weeks.push(currentWeek);
-    currentWeek = [];
-  }
-  
-  currentDate.setDate(currentDate.getDate() + 1);
-}
-
-if (currentWeek.length > 0) {
-  weeks.push(currentWeek);
-}
-
-const maxSeverity = Math.max(...Array.from(dayMap.values()).map(d => d.severity), 1);
+const { status, unresolved } = await sync();
+const { dayMap, incidents, maxSeverity, weeks } = heatmap();
 
 // –
 // Trends
@@ -175,7 +56,7 @@ let longestStreak = 0;
 let currentStreak = 0;
 let streakEnd = '';
 let bestStreakEnd = '';
-const sortedDays = [...dayMap.keys()].sort();
+const today = new Date();
 const firstDay = incidents.length ? incidents.at(-1)!.started_at.split('T')[0] : today.toISOString().split('T')[0];
 const iterDate = new Date(firstDay);
 while (iterDate <= today) {
@@ -204,6 +85,17 @@ const peakMonth = months.reduce((best, m) => m.count > best.count ? m : best, mo
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
 		<title>Github Downfall</title>
+		<meta name="description" content="Track Github's historical incidents and downtime" />
+		<meta property="og:title" content="Github Downfall" />
+		<meta property="og:description" content="Track Github's historical incidents and downtime" />
+		<meta property="og:type" content="website" />
+		<meta property="og:image" content={new URL("/og.png", Astro.url).href} />
+		<meta property="og:image:width" content="1200" />
+		<meta property="og:image:height" content="630" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<meta name="twitter:title" content="Github Downfall" />
+		<meta name="twitter:description" content="Track Github's historical incidents and downtime" />
+		<meta name="twitter:image" content={new URL("/og.png", Astro.url).href} />
 	</head>
 	<body class="min-h-screen bg-gray-950 text-gray-200 px-4 py-6 md:p-12 font-sans">
 		<header class="max-w-7xl mx-auto mb-8">
