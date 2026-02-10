@@ -5,6 +5,16 @@ import "../styles/global.css";
 const { status, unresolved } = await sync();
 const { dayMap, incidents, maxSeverity, weeks } = heatmap();
 
+// OG cache-bust fingerprint (changes on date, status, or incident change)
+const ogSeed = [
+  new Date().toISOString().split("T")[0],
+  status?.status.indicator ?? "none",
+  unresolved?.incidents[0]?.id ?? "",
+].join("-");
+let ogHash = 0;
+for (let i = 0; i < ogSeed.length; i++) ogHash = ((ogHash << 5) - ogHash + ogSeed.charCodeAt(i)) | 0;
+const ogV = Math.abs(ogHash).toString(36);
+
 // –
 // Trends
 // –
@@ -89,13 +99,15 @@ const peakMonth = months.reduce((best, m) => m.count > best.count ? m : best, mo
 		<meta property="og:title" content="Github Downfall" />
 		<meta property="og:description" content="Track Github's historical incidents and downtime" />
 		<meta property="og:type" content="website" />
-		<meta property="og:image" content={new URL("/og.png", Astro.url).href} />
+		<meta property="og:image" content={new URL(`/og.png?v=${ogV}`, Astro.url).href} />
 		<meta property="og:image:width" content="1200" />
 		<meta property="og:image:height" content="630" />
 		<meta name="twitter:card" content="summary_large_image" />
 		<meta name="twitter:title" content="Github Downfall" />
 		<meta name="twitter:description" content="Track Github's historical incidents and downtime" />
-		<meta name="twitter:image" content={new URL("/og.png", Astro.url).href} />
+		<meta name="twitter:image" content={new URL(`/og.png?v=${ogV}`, Astro.url).href} />
+		<meta name="twitter:image:width" content="1200" />
+		<meta name="twitter:image:height" content="630" />
 	</head>
 	<body class="min-h-screen bg-gray-950 text-gray-200 px-4 py-6 md:p-12 font-sans">
 		<header class="max-w-7xl mx-auto mb-8">
