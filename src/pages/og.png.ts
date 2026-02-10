@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { Resvg } from "@resvg/resvg-js";
 import satori from "satori";
 
-import { sync, heatmap } from "../data";
+import { sync, heatmap, statusInfo } from "../data";
 import logoSvg from "../../public/favicon-light.svg?raw";
 
 // –
@@ -83,39 +83,19 @@ export const GET: APIRoute = async () => {
 
   const logoUri = `data:image/svg+xml;base64,${Buffer.from(logoSvg).toString("base64")}`;
 
-  const { status, unresolved } = await sync();
-  const { incidents, maxSeverity, weeks } = heatmap();
+  const syncResult = await sync();
+  const heatmapResult = heatmap();
+  const { maxSeverity, weeks } = heatmapResult;
+  const info = statusInfo(syncResult, heatmapResult);
 
-  const hasIssues = unresolved && unresolved.incidents.length > 0;
-  const indicator = status?.status.indicator ?? "none";
-
-  // Status label, color, and duration
-  const statusLabel =
-    indicator === "critical" ? "Critical"
-    : indicator === "major" ? "Major Outage"
-    : indicator === "minor" ? "Minor Outage"
-    : "Normal";
   const statusColor =
-    indicator === "none" ? "#22c55e"
-    : indicator === "minor" ? "#f59e0b"
+    info.indicator === "none" ? "#22c55e"
+    : info.indicator === "minor" ? "#f59e0b"
     : "#ef4444";
   const statusTextColor =
-    indicator === "none" ? "#86efac"
-    : indicator === "minor" ? "#fcd34d"
+    info.indicator === "none" ? "#86efac"
+    : info.indicator === "minor" ? "#fcd34d"
     : "#fca5a5";
-
-  // How long the current status has been ongoing
-  const now = Date.now();
-  const ongoingSince = hasIssues
-    ? Math.min(...unresolved!.incidents.map((i) => new Date(i.started_at).getTime()))
-    : incidents.length
-      ? new Date(incidents.find((i) => i.resolved_at)?.resolved_at ?? now).getTime()
-      : now;
-  const durationMs = now - ongoingSince;
-  const durationText =
-    durationMs < 3_600_000 ? `for ${Math.max(1, Math.round(durationMs / 60_000))} min`
-    : durationMs < 86_400_000 ? `for ${Math.round(durationMs / 3_600_000)} hr`
-    : `for ${Math.round(durationMs / 86_400_000)} days`;
 
   // Heatmap grid — 21 weeks with the leftmost fading off the left edge
   const FADE = [0.12, 0.3, 0.55, 0.8];
@@ -139,9 +119,9 @@ export const GET: APIRoute = async () => {
       "div",
       { alignItems: "center", gap: 12, marginTop: 6 },
       h("div", { background: statusColor, borderRadius: 8, flexShrink: 0, height: 16, width: 16 }),
-      h("div", { color: statusTextColor, fontSize: 32, fontWeight: 700 }, statusLabel),
+      h("div", { color: statusTextColor, fontSize: 32, fontWeight: 700 }, info.label),
     ),
-    h("div", { color: "#6b7280", fontSize: 24, marginTop: 4 }, durationText),
+    h("div", { color: "#6b7280", fontSize: 24, marginTop: 4 }, info.duration),
   );
 
   // Root layout

@@ -93,6 +93,54 @@ export async function sync() {
 }
 
 // –
+// Status info
+// –
+
+/** Derived status with human-readable label and duration. */
+export interface StatusInfo {
+  /** Human-readable duration (e.g. "for 3 hr"). */
+  duration: string;
+  /** Raw indicator ("none" | "minor" | "major" | "critical"). */
+  indicator: string;
+  /** Human-readable label. */
+  label: string;
+}
+
+/** Derive unified status label and duration from live data. */
+export function statusInfo(
+  { status, unresolved }: Awaited<ReturnType<typeof sync>>,
+  { incidents }: Pick<ReturnType<typeof heatmap>, "incidents">,
+): StatusInfo {
+  const indicator = status?.status.indicator ?? "none";
+  const label =
+  indicator === "critical" ? "Critical Outage"
+  : indicator === "major" ? "Major Outage"
+  : indicator === "minor" ? "Minor Outage"
+  : "All Systems Operational";
+
+  // How long the current status has been ongoing (branch on indicator to match label)
+  const now = Date.now();
+  const ongoingSince =
+    // Outage: since earliest unresolved incident started
+    indicator !== "none" && unresolved?.incidents.length
+      ? Math.min(...unresolved.incidents.map((i) => new Date(i.started_at).getTime()))
+    // Operational but incidents not yet formally closed: since latest update (recovery moment)
+    : unresolved?.incidents.length
+      ? Math.max(...unresolved.incidents.map((i) => new Date(i.updated_at).getTime()))
+    // Operational, all closed: since latest resolution
+    : incidents.length
+      ? Math.max(...incidents.filter((i) => i.resolved_at).map((i) => new Date(i.resolved_at!).getTime()), 0) || now
+      : now;
+  const durationMs = now - ongoingSince;
+  const duration =
+    durationMs < 3_600_000 ? `for ${Math.max(1, Math.round(durationMs / 60_000))} min`
+    : durationMs < 86_400_000 ? `for ${Math.round(durationMs / 3_600_000)} hr`
+    : `for ${Math.round(durationMs / 86_400_000)} days`;
+
+  return { duration, indicator, label };
+}
+
+// –
 // Heatmap
 // –
 
@@ -116,17 +164,18 @@ export function heatmap() {
     day.incidents.push(incident);
   }
 
-  // Generate last year of days
+  // Generate last year of days (UTC throughout to match toISOString keys)
   const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
   const oneYearAgo = new Date(today);
-  oneYearAgo.setFullYear(today.getFullYear() - 1);
+  oneYearAgo.setUTCFullYear(today.getUTCFullYear() - 1);
 
   const weeks: HeatmapDay[][] = [];
   let currentWeek: HeatmapDay[] = [];
   let currentDate = new Date(oneYearAgo);
 
   // Start on Sunday
-  currentDate.setDate(currentDate.getDate() - currentDate.getDay());
+  currentDate.setUTCDate(currentDate.getUTCDate() - currentDate.getUTCDay());
 
   while (currentDate <= today) {
     const dayKey = currentDate.toISOString().split("T")[0];
@@ -144,7 +193,7 @@ export function heatmap() {
       currentWeek = [];
     }
 
-    currentDate.setDate(currentDate.getDate() + 1);
+    currentDate.setUTCDate(currentDate.getUTCDate() + 1);
   }
 
   if (currentWeek.length > 0) weeks.push(currentWeek);
