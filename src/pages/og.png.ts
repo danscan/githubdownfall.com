@@ -148,8 +148,8 @@ export const GET: APIRoute = async () => {
         h(
           "div",
           { flexDirection: "column" },
-          h("div", { fontSize: 42, fontWeight: 700 }, "Github Downfall"),
-          h("div", { color: "#9ca3af", fontSize: 22, marginTop: 4 }, "Track Github's incidents and downtime"),
+          h("div", { fontSize: 42, fontWeight: 700 }, "GitHub Downfall"),
+          h("div", { color: "#9ca3af", fontSize: 22, marginTop: 4 }, "Track GitHub's incidents and downtime"),
         ),
       ),
       statusSection,
